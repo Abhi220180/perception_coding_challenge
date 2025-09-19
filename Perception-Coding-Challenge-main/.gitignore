@@ -1,0 +1,22 @@
+# Ignore the dataset folder
+dataset/
+
+# Ignore generated media files
+*.gif
+*.mp4
+*.jpeg
+*.jpg
+
+# Keep the final trajectory.png output, but ignore other pngs
+*.png
+!trajectory.png
+!sample_static_BEV_plot.png
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore environment files
+.env
+.venv
+venv/
