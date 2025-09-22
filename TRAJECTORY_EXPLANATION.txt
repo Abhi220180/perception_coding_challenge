@@ -1,0 +1,65 @@
+Title: Trajectory Estimation Approach and Why the PNG Looks the Way It Does
+
+Overview
+- Goal: Estimate the ego-vehicle’s trajectory relative to a fixed world landmark (the overhead traffic light) and render it in a Bird’s‑Eye View (ground frame).
+- Inputs: RGB frames, per-frame traffic-light bounding boxes (bbox_light.csv), and per-frame XYZ point clouds (depthNNNNNN.npz).
+- Outputs: trajectory.png (static BEV plot), trajectory.mp4 or trajectory.gif (animated), and an ego-frame animation for reference.
+
+How the Code Works (high level)
+1) Traffic-light pixel per frame
+   - Read bbox_light.csv, take the bounding box center (u, v) for each frame where a box exists.
+
+2) 3D point lookup with robustness
+   - Load the corresponding depthNNNNNN.npz (key "xyz" or "points").
+   - Take a 5x5 patch around (u, v), drop NaNs/zeros, and use the median point to mitigate noise/outliers.
+   - This yields (X, Y, Z) in the camera coordinate system for the traffic-light pixel. Camera axes: +X forward, +Y right, +Z up.
+
+3) Convert to ego motion vector in the camera axes
+   - The traffic light is fixed in the world. Its apparent motion in the camera frame equals the negative of the ego motion.
+   - For each frame, form v = (-X, -Y). These are the forward/left components in that instantaneous camera frame (since camera +Y is right, we negate to get left).
+
+4) Build a fixed ground frame once
+   - Use the first valid frame to define the world axes:
+     • ex: normalize v0 (forward direction from the traffic light to the car at t0)
+     • ey: ex rotated by +90 degrees so that +Y points left
+   - This creates a stable, right-handed basis anchored at the traffic light.
+
+5) Project every frame into that ground frame
+   - For each v, compute:
+       x_ground = dot(ex, v)
+       y_ground = dot(ey, v)
+   - Append (x_ground, y_ground) to the trajectory list.
+   - Light smoothing (moving average) is applied only for visualization to reduce jitter, not to change the global shape.
+
+6) Plot and animate
+   - trajectory.png: scatter + line in meters, equal aspect, origin marked at the traffic light.
+   - trajectory.mp4/gif: animated ground-frame path over time.
+   - ego_trajectory.mp4/gif: animated path in the instantaneous camera (ego) frame.
+
+Why the PNG Looks Like a Sweeping Left Turn (and the small early “right” kink)
+- The car is actually executing a left arc relative to the traffic light. When we anchor the world frame at the light and set +Y to the left, the curve will bend toward increasing Y as the car passes to the left of the pole.
+- The small initial “right” bend is expected and correct in this world-frame view:
+  • At t0 the car is to the right of the pole and begins turning left.
+  • The vector from the pole to the car can rotate clockwise briefly (negative Y, which visually reads as a tiny rightward bend) before the dominant left sweep takes over.
+  • Early samples are most sensitive to depth/box noise; a short kink can be accentuated before smoothing stabilizes the path.
+
+What This Plot Represents (important)
+- Absolute position of the car relative to the fixed traffic light, not instantaneous steering angle.
+- Because the reference is the pole, any path where the car passes to the right of the pole and then sweeps left will naturally show a short clockwise bend followed by a larger counterclockwise arc.
+
+Sanity Checks
+- Ranges printed at the end of the run (X/Y min/max) and the total distance give reasonable magnitudes (tens of meters).
+- The ego-frame animation shows most motion along forward with lateral drift; the ground-frame animation shows the world-anchored arc.
+
+Limitations and Notes
+- Bounding-box and depth noise can introduce local wiggles; we apply a small moving average only for visualization.
+- The world frame is initialized from the first valid frame. For even more stability, one could average the first N frames to build the basis or skip the first K frames in the static plot.
+- Dataset is large and intentionally ignored by .gitignore; only code/figures are pushed.
+
+How to Reproduce
+- Ensure the dataset/ folder is alongside trajectory_estimator.py (with rgb/, xyz/, bbox_light.csv).
+- Run:  python trajectory_estimator.py
+- Outputs: trajectory.png, trajectory.mp4 (or trajectory.gif), ego_trajectory.mp4 (or ego_trajectory.gif).
+
+Takeaway
+- The trajectory image matches the physical scenario: a sweeping left arc around a fixed landmark, with a small, expected early clockwise kink due to initial relative geometry and measurement noise. The coordinate setup (basis from the first frame, ex forward, ey left) ensures +Y truly corresponds to “left from the traffic light.”
