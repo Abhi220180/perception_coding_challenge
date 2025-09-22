@@ -23,6 +23,7 @@ class TrajectoryEstimator:
         self.bbox_data = self._load_bbox_data()
         self.trajectory_points = []
         self.traffic_light_positions = []
+        self.ego_frame_points = []
         
     def _load_bbox_data(self) -> pd.DataFrame:
         """ load and clean bounding box csv data. """
@@ -121,10 +122,17 @@ class TrajectoryEstimator:
         
         ref_X, ref_Y, ref_Z = ref_tl_pos
         
+        # establish a fixed ground-frame orientation using the first valid frame.
+        # vector from traffic light (world origin) to ego car in the first frame (in camera axes)
+        v0_x, v0_y = -ref_X, -ref_Y
+        # build an orthonormal basis: ex along v0 (forward), ey to its left (+90 deg)
+        v0_norm = max(1e-6, float(np.hypot(v0_x, v0_y)))
+        ex_x, ex_y = v0_x / v0_norm, v0_y / v0_norm
+        ey_x, ey_y = -ex_y, ex_x  # rotate ex by +90 degrees to point LEFT
+        
         total_frames = len(valid_frames)
         for idx, frame_id in enumerate(valid_frames):
-            if idx % 10 == 0 or idx == total_frames - 1:
-                print(f"Processing frame {idx + 1}/{total_frames} (ID: {frame_id})")
+            print(f"Processing frame {idx + 1}/{total_frames} (ID: {frame_id})")
 
             center = self.get_traffic_light_center(frame_id)
             if center is None:
@@ -135,66 +143,23 @@ class TrajectoryEstimator:
                 continue
                 
             X, Y, Z = tl_pos
+
+            # convert traffic light's apparent motion to ego-vehicle's motion (in camera axes)
+            # Note: camera +Y is right, but ground +Y is left, so we negate Y
+            v_x, v_y = -X, Y  # negate Y because ground frame Y goes left, not right
+            # store raw ego-frame vector for optional ego-frame visualization
+            self.ego_frame_points.append((float(v_x), float(v_y)))
             
-            # convert traffic light's apparent motion to ego-vehicle's motion.
-            
-            ground_x = -X
-            ground_y = -Y
-            
-            trajectory.append((ground_x, ground_y))
+            # project onto the fixed ground-frame basis (ex forward, ey left)
+            ground_x = ex_x * v_x + ex_y * v_y
+            ground_y = ey_x * v_x + ey_y * v_y
+
+            trajectory.append((float(ground_x), float(ground_y)))
             self.traffic_light_positions.append((X, Y, Z))
             
         print(f"Computed {len(trajectory)} trajectory points")
         return trajectory
 
-    def create_trajectory_animation(self, trajectory: List[Tuple[float, float]], mp4_path: str = "trajectory.mp4", gif_path: str = "trajectory.gif", fps: int = 15):
-        """ create an animated bev trajectory video. """
-        if not trajectory:
-            print("No trajectory points to animate")
-            return
-        traj = np.array(trajectory)
-        x, y = traj[:, 0], traj[:, 1]
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.set_xlabel('X (meters) - Forward from traffic light')
-        ax.set_ylabel('Y (meters) - Left from traffic light')
-        ax.set_title("Ego-Vehicle Trajectory in Ground Frame (Animated)")
-        ax.grid(True, alpha=0.3)
-        ax.scatter(0, 0, c='orange', s=150, marker='*', label='Traffic light (origin)', zorder=5)
-        ax.legend()
-        ax.set_aspect('equal', adjustable='datalim')
-        ax.plot([], [])
-        line, = ax.plot([], [], 'b-', lw=2, alpha=0.9)
-        pts = ax.scatter([], [], c='blue', s=20, alpha=0.7)
-
-        pad = 2.0
-        ax.set_xlim(min(x) - pad, max(x) + pad)
-        ax.set_ylim(min(y) - pad, max(y) + pad)
-
-        def init():
-            line.set_data([], [])
-            pts.set_offsets(np.empty((0, 2)))
-            return line, pts
-
-        def update(i):
-            line.set_data(x[:i+1], y[:i+1])
-            pts.set_offsets(np.column_stack([x[:i+1], y[:i+1]]))
-            return line, pts
-
-        ani = animation.FuncAnimation(fig, update, frames=len(x), init_func=init, interval=1000/max(1, fps), blit=True)
-        saved = False
-        # try to save as mp4, fall back to gif if ffmpeg is unavailable.
-        try:
-            writer = animation.writers['ffmpeg'](fps=fps, metadata=dict(artist='Cascade'), bitrate=1800)
-            ani.save(mp4_path, writer=writer)
-            print(f"animation saved to {mp4_path}")
-        except (RuntimeError, KeyError):
-            warnings.warn(f"ffmpeg not available. Attempting to save as GIF at {gif_path}.")
-            try:
-                ani.save(gif_path, writer='pillow', fps=fps)
-                print(f"Animation saved to {gif_path}")
-            except Exception as e:
-                warnings.warn(f"Could not save animation as GIF: {e}")
-        plt.close(fig)
     
     def plot_trajectory(self, trajectory: List[Tuple[float, float]], output_path: str = "trajectory.png"):
         """ plot the ego-vehicle trajectory in bird's-eye view. """
@@ -203,6 +168,8 @@ class TrajectoryEstimator:
             return
             
         traj_array = np.array(trajectory)
+        if traj_array.shape[0] >= 7:
+            traj_array = self._smooth_xy(traj_array, window=5)
         x_coords = traj_array[:, 0]
         y_coords = traj_array[:, 1]
         
@@ -224,6 +191,15 @@ class TrajectoryEstimator:
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.axis('equal')
         
+        # Set explicit axis limits, ensuring the origin (0,0) is always visible.
+        pad = 5.0  # Increased padding slightly for better framing
+        x_min = min(min(x_coords), 0) - pad
+        x_max = max(max(x_coords), 0) + pad
+        y_min = min(min(y_coords), 0) - pad
+        y_max = max(max(y_coords), 0) + pad
+        plt.xlim(x_min, x_max)
+        plt.ylim(y_min, y_max)
+        
         total_distance = np.sum(np.sqrt(np.diff(x_coords)**2 + np.diff(y_coords)**2))
         stats_text = f'Total Distance: {total_distance:.2f}m\nData Points: {len(trajectory)}'
         plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes,
@@ -234,6 +210,21 @@ class TrajectoryEstimator:
         plt.close()
         
         print(f"Trajectory plot saved to {output_path}")
+
+    def _smooth_xy(self, xy: np.ndarray, window: int = 5) -> np.ndarray:
+        """ simple moving average smoothing for 2D points. """
+        if window <= 1 or xy.shape[0] < window:
+            return xy
+        kernel = np.ones(window, dtype=np.float32) / float(window)
+        pad = window // 2
+        x = np.convolve(xy[:, 0], kernel, mode='same')
+        y = np.convolve(xy[:, 1], kernel, mode='same')
+        # edge handling: fall back to original near boundaries to avoid shrinkage
+        x[:pad] = xy[:pad, 0]
+        x[-pad:] = xy[-pad:, 0]
+        y[:pad] = xy[:pad, 1]
+        y[-pad:] = xy[-pad:, 1]
+        return np.column_stack([x, y])
         
     def run_full_pipeline(self):
         """ execute the full trajectory estimation and visualization pipeline. """
@@ -248,8 +239,6 @@ class TrajectoryEstimator:
         print("\nStep 2: Generating static trajectory plot...")
         self.plot_trajectory(trajectory)
 
-        print("\nStep 3: Generating animated trajectory video...")
-        self.create_trajectory_animation(trajectory)
 
         print("\n--- Trajectory Summary ---")
         traj_array = np.array(trajectory)
